@@ -10,6 +10,7 @@ import subprocess
 import time
 import signal
 import sys
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -18,10 +19,10 @@ V2_DIR = Path("/Users/andreas/bitget_bot_V2")
 FETCH_SCRIPT = V1_DIR / "fetch_bot.py"
 V1_VENV = V1_DIR / ".venv" / "bin" / "python3"
 V2_VENV = V2_DIR / ".venv" / "bin" / "python3"
-REFRESH = 5  # Sekunden
+REFRESH = 5
+
 
 def fetch_bot(bot_dir, venv_python):
-    """Ruft Positionen per Subprocess ab (isolierte Imports). Timeout 10s."""
     try:
         result = subprocess.run(
             [str(venv_python), str(FETCH_SCRIPT), str(bot_dir)],
@@ -34,7 +35,7 @@ def fetch_bot(bot_dir, venv_python):
         except json.JSONDecodeError as e:
             return [], f"JSON-Fehler: {e}"
     except subprocess.TimeoutExpired:
-        return [], f"Timeout (>10s)"
+        return [], "Timeout (>10s)"
     except FileNotFoundError:
         return [], f"Python nicht gefunden: {venv_python}"
 
@@ -45,19 +46,58 @@ def fmt(v, decimals=2):
     return f"{v:.{decimals}f}"
 
 
+def calc_trade_summary():
+    """Alle Trades aus Log/CSV: Summe Gewinne/Verluste."""
+    v1_wins = v1_losses = v2_wins = v2_losses = 0.0
+
+    # V1: spread_scalper.log
+    try:
+        for line in Path(str(V1_DIR / "spread_scalper.log")).read_text().splitlines():
+            if "TRADE:" not in line:
+                continue
+            m = re.search(r"([+-]?[\d.]+) USDT", line)
+            if m:
+                pnl = float(m.group(1))
+                if pnl >= 0:
+                    v1_wins += pnl
+                else:
+                    v1_losses += abs(pnl)
+    except:
+        pass
+
+    # V2: trades_v2.csv
+    try:
+        for line in Path(str(V2_DIR / "trades_v2.csv")).read_text().splitlines():
+            parts = line.split(",")
+            if len(parts) < 7 or parts[0] == "ts":
+                continue
+            pnl_str = parts[6].strip()
+            if pnl_str:
+                pnl = float(pnl_str)
+                if pnl >= 0:
+                    v2_wins += pnl
+                else:
+                    v2_losses += abs(pnl)
+    except:
+        pass
+
+    return v1_wins, v1_losses, v2_wins, v2_losses
+
+
 def render():
     v1_positions, v1_err = fetch_bot(V1_DIR, V1_VENV)
     v2_positions, v2_err = fetch_bot(V2_DIR, V2_VENV)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    v1_w, v1_l, v2_w, v2_l = calc_trade_summary()
     lines = []
 
     lines.append(f"{'='*80}")
-    lines.append(f"  📊 DUAL-BOT DASHBOARD  —  {now}  (Refresh: alle {REFRESH}s | Strg+C = Ende)")
+    lines.append(f"  SHORT_BOT {v1_w-v1_l:>+7.2f} USDT  |  V2 {v2_w-v2_l:>+7.2f} USDT  |  {now}")
     lines.append(f"{'='*80}")
 
     # V1
-    lines.append(f"\n  🔴 V1 — Spread-Scalper (LIVE)")
+    lines.append(f"\n  🔴 SHORT_BOT (LIVE)")
     if v1_err:
         lines.append(f"  ❌ {v1_err}")
     elif not v1_positions:
@@ -92,7 +132,7 @@ def render():
     total_v1 = sum(p["pnl"] for p in v1_positions)
     total_v2 = sum(p["pnl"] for p in v2_positions)
     lines.append(f"\n{'='*80}")
-    lines.append(f"  V1 PnL: {total_v1:>+8.2f} USDT  |  V2 PnL: {total_v2:>+8.2f} USDT  |  "
+    lines.append(f"  SHORT_BOT PnL: {total_v1:>+8.2f} USDT  |  V2 PnL: {total_v2:>+8.2f} USDT  |  "
                  f"Gesamt: {total_v1+total_v2:>+8.2f} USDT")
     lines.append(f"{'='*80}")
 
