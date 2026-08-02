@@ -1,4 +1,4 @@
-# DS-SpreadScalper — Aktuelle Strategie (Code-Stand 12.07.2026)
+# SHORT_BOT — Aktuelle Strategie (Code-Stand 22.07.2026)
 
 ## Überblick
 
@@ -82,6 +82,13 @@ TP_LEVELS = [{"pct": 1.0, "atr_mult": 2.0}]  # 100% @ 2.0× ATR
 1. **Primär**: `calc_chart_sl()` — höchstes High der letzten 20 1H-Kerzen + 0.1%
 2. **Fallback**: `1.5× ATR` wenn keine Chartdaten
 3. **Safety**: SL nie näher als `0.5× ATR` vom Entry
+
+### 🛡️ SL-Hit-Schutz (Funding-Puffer) — ab 02.08.2026
+
+Wenn der SL getroffen würde, aber die **Funding-Rate positiv** ist (Longs zahlen Shorts → Short-Position verdient Funding):
+- SL wird um **0.5×ATR** erweitert statt den Trade zu schliessen
+- Die Funding-Zahlung kompensiert die offene Position
+- Verhindert SL-Hits während Funding-gegenläufiger Phasen (nächtliche Whipsaws)
 
 ### ROE-Trailing (ab +3% Peak)
 

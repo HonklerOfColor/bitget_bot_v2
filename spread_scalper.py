@@ -1,6 +1,6 @@
 """
-DS-SpreadScalper — High-Frequency Spread Scalping Bot
-======================================================
+SHORT_BOT — High-Frequency Spread Scalping Bot
+===============================================
 Strategie: Spread-Penetration on Bitget Futures
 - Liest Orderbook alle 2s
 - Platziert Limit-Orders knapp über Bid / unter Ask
@@ -22,8 +22,8 @@ OFFSET_PCT = 0.0001        # 0.01% Offset (hauchduenn, um im Orderbook zu bleibe
 MAX_SPREAD_PCT = 0.005     # Max 0.5% Spread (sonst zu volatil)
 TELEGRAM_ON = True
 
-# 🧭 Beide Richtungen (Funding-Signal gesteuert)
-SHORT_ONLY = False      # False = LONG+SHORT via Funding-Signal
+# 🧭 SHORT-Only (Backtest: Short 13× profitabler als Long)
+SHORT_ONLY = True       # True = SHORT-Only (Backtest-Ranking Platz 3)
 EMAFILTER = False       # Trendfilter: True = nur in EMA-Richtung traden
 
 # 🧠 Trade Analysis — DeepSeek nach jedem Trade
@@ -95,7 +95,7 @@ class SpreadScalper:
         self.load_learnings()
         
         logger.info("=" * 50)
-        logger.info("🚀 DS-SpreadScalper gestartet")
+        logger.info("🚀 SHORT_BOT gestartet")
         logger.info(f"   Symbole: {SYMBOLS}")
         logger.info(f"   Intervall: {LOOP_INTERVAL}s | Hebel: {LEVERAGE}x")
         logger.info(f"   Offset: {OFFSET_PCT*100:.3f}%")
@@ -480,11 +480,11 @@ Answer in GERMAN, max 2 sentences:
         fr = cg["funding_rate"]
         
         # 📡 Starkes Funding-Signal
-        if fr > FUNDING_SIGNAL_THRESHOLD:
-            logger.debug(f"  📡 Funding {cg['funding_pct']:+.4f}% → SHORT (Crowd long)")
+        if fr >= FUNDING_SIGNAL_THRESHOLD:
+            logger.info(f"  📡 Funding {cg['funding_pct']:+.4f}% → SHORT (Crowd long)")
             return "short"
-        elif fr < -FUNDING_SIGNAL_THRESHOLD:
-            logger.debug(f"  📡 Funding {cg['funding_pct']:+.4f}% → LONG (Crowd short)")
+        elif fr <= -FUNDING_SIGNAL_THRESHOLD:
+            logger.info(f"  📡 Funding {cg['funding_pct']:+.4f}% → LONG (Crowd short)")
             return "long"
         
         # 📡 Neutrales Funding → EMA-Trendfilter
@@ -500,8 +500,18 @@ Answer in GERMAN, max 2 sentences:
                     return "short"
         
         # Kein klares Signal → skip
-        logger.debug(f"  ⏭️  Funding neutral, kein EMA-Filter — kein Trade")
+        logger.info(f"  ⏭️  Funding {cg['funding_pct']:+.4f}% — neutral, kein Trade")
         return None
+
+    def _get_funding_rate(self, symbol):
+        """Aktuelle Funding-Rate holen (positiv = Longs zahlen Shorts)."""
+        try:
+            ticker = client.get_ticker(symbol)
+            if not ticker:
+                return None
+            return float(ticker.get("fundingRate", 0))
+        except:
+            return None
 
     def get_position(self, symbol):
         """Aktuelle Position abrufen"""
@@ -514,6 +524,7 @@ Answer in GERMAN, max 2 sentences:
                     "entry": float(pos.get("openPriceAvg", 0)),
                     "pnl": float(pos.get("unrealizedPL", 0)),
                     "markPrice": float(pos.get("markPrice", 0)),
+                    "margin": float(pos.get("marginSize", 0)),
                 }
         except:
             pass
@@ -803,12 +814,28 @@ Answer in GERMAN, max 2 sentences:
                             self.positions.pop(symbol, None)
                             self.peak_roe.pop(symbol, None)
                         elif sl_price is not None and mark_price >= sl_price:
-                            logger.warning(f"🛑 {symbol} SHORT SL hit @ {mark_price:.2f} >= {sl_price:.2f}")
-                            actual_pnl = (pos["entry"] - sl_price) * pos["size"]
-                            self.record_trade(symbol, "short", pos["entry"], sl_price, actual_pnl, "SL")
-                            self.place_market_close(symbol, pos["side"], pos["size"])
-                            self.positions.pop(symbol, None)
-                            self.peak_roe.pop(symbol, None)
+                            # 🛡️ SL-Hit-Schutz: Wenn Funding positiv (Longs zahlen Shorts),
+                            # SL erweitern statt schliessen — Funding kompensiert die offene Position
+                            funding = self._get_funding_rate(symbol)
+                            if funding is not None and funding > 0:
+                                atr = self.calc_atr(symbol)
+                                new_sl = sl_price + (atr * 0.5) if atr else sl_price * 1.003
+                                new_sl = round(new_sl, PRICE_PLACES.get(symbol, 2))
+                                logger.warning(f"🛡️ {symbol} SHORT SL-Hit, aber Funding {funding*100:+.4f}% positiv → "
+                                               f"SL erweitert von {sl_price:.2f} auf {new_sl:.2f}")
+                                self.positions[symbol]["sl"] = new_sl
+                                # Exchange-SL ebenfalls anpassen
+                                try:
+                                    self.set_tpsl_for_position(symbol, "short", tp_prices, new_sl, pos["size"])
+                                except:
+                                    pass
+                            else:
+                                logger.warning(f"🛑 {symbol} SHORT SL hit @ {mark_price:.2f} >= {sl_price:.2f}")
+                                actual_pnl = (pos["entry"] - sl_price) * pos["size"]
+                                self.record_trade(symbol, "short", pos["entry"], sl_price, actual_pnl, "SL")
+                                self.place_market_close(symbol, pos["side"], pos["size"])
+                                self.positions.pop(symbol, None)
+                                self.peak_roe.pop(symbol, None)
                     
                     # ── Dynamischer SL (alle 10s nachgeführt) ──
                     # ROE-basiertes Trailing: SL 2% unter Peak-ROE.
@@ -826,7 +853,10 @@ Answer in GERMAN, max 2 sentences:
                                 entry_price = float(pos["entry"])
                                 pos_size = float(pos["size"])
                                 pnl = float(pos.get("pnl", 0))
-                                margin = pos_size * mark / LEVERAGE
+                                # Exchange-Margin bevorzugen, Fallback auf Bot-Berechnung
+                                margin = float(pos.get("margin", 0))
+                                if margin == 0:
+                                    margin = pos_size * mark / LEVERAGE
                                 roe_pct = (pnl / margin) * 100 if margin > 0 else 0
 
                                 # Peak-ROE aktualisieren
