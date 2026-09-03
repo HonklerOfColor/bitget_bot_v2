@@ -15,16 +15,17 @@ sys.path.insert(0, "/Users/andreas/bitget_bot_v1")
 import bitget_client as client
 
 # ── Config ───────────────────────────────────────────────────────────────────
-SYMBOLS = ["SOLUSDT", "BTCUSDT", "ETHUSDT"]
+SYMBOLS = ["BTCUSDT", "ETHUSDT"]  # SOLUSDT entfernt (Learning: SOL-Shorts −1.97 USDT, gestern −3.06)
 LOOP_INTERVAL = 2          # Alle 2 Sekunden
 LEVERAGE = 3  # 3× Hebel (Backtest: V10 1× verliert 10× weniger als 5×)
 OFFSET_PCT = 0.0001        # 0.01% Offset (hauchduenn, um im Orderbook zu bleiben)
 MAX_SPREAD_PCT = 0.005     # Max 0.5% Spread (sonst zu volatil)
 TELEGRAM_ON = True
 
-# 🧭 SHORT-Only (Backtest: Short 13× profitabler als Long)
-SHORT_ONLY = True       # True = SHORT-Only (Backtest-Ranking Platz 3)
-EMAFILTER = False       # Trendfilter: True = nur in EMA-Richtung traden
+# 🧭 NUR LONG (Learning 26.08.: SHORTs −231 USDT über 1577 Trades)
+SHORT_ONLY = False
+LONG_ONLY = True
+EMAFILTER = True        # Trendfilter: True = nur in EMA-Richtung traden (Backtest-Pflicht!)
 
 # 🧠 Trade Analysis — DeepSeek nach jedem Trade
 ANALYSIS_ENABLED = True   # False = deaktivieren (keine API-Kosten)
@@ -43,7 +44,7 @@ MIN_SIZES = {
 
 # 📊 Single-Level TP: 100% bei 2×ATR (bessere TP-Trefferquote als 3×)
 TP_LEVELS = [
-    {"pct": 1.0, "atr_mult": 2.0, "label": "TP1"},   # 100% @ 2.0× ATR
+    {"pct": 1.0, "atr_mult": 2.5, "label": "TP1"},   # 100% @ 2.5× ATR (Learning: Gewinner laufen lassen, >2h = 71% WR)
 ]
 SL_BASE_MULT = 0.30     # 0.30× ATR baseline
 SL_MAX_MULT = 0.60      # 0.60× ATR bei Verlustserie (proportional zu SL_BASE)
@@ -65,7 +66,7 @@ SPREAD_PEN_LONG = {}    # Keine Overrides nötig (LONG via Hedge, SHORT_ONLY)
 MAX_FUNDING_RATE = 0.0005     # 0.05% — SHORT nur wenn Funding darunter (sonst extreme crowded long)
 OI_MIN_CHANGE_PCT = -10       # Min OI-Change % im Ticker (Filter für Illiquidität)
 # 📊 Richtungssignal — Funding Rate Schwelle
-FUNDING_SIGNAL_THRESHOLD = 0.0001  # 0.01% — Funding > +0.01% → SHORT, < -0.01% → LONG
+FUNDING_SIGNAL_THRESHOLD = 0.0002  # 0.02% — Funding > +0.02% → SHORT, < -0.02% → LONG (weniger Noise)
 
 # Logger
 logger.remove()
@@ -476,6 +477,21 @@ Answer in GERMAN, max 2 sentences:
         """
         if SHORT_ONLY:
             return "short"
+
+        # Learning 26.08.: SHORTs −231 USDT über 1577 Trades → NUR LONG
+        if LONG_ONLY:
+            fr = cg["funding_rate"]
+            # LONG nur bei negativem Funding (Crowd short) oder neutral + Preis > EMA
+            if fr <= -FUNDING_SIGNAL_THRESHOLD:
+                logger.info(f"  📡 Funding {cg['funding_pct']:+.4f}% → LONG (Crowd short)")
+                return "long"
+            if EMAFILTER:
+                ema = self._calc_ema(symbol)
+                if ema is not None and depth["mid"] > ema:
+                    logger.debug(f"  📡 Preis ${depth['mid']:.2f} > EMA ${ema:.2f} → LONG")
+                    return "long"
+            logger.info(f"  ⏭️  LONG_ONLY: Funding {cg['funding_pct']:+.4f}% nicht negativ, Preis < EMA — kein Trade")
+            return None
 
         fr = cg["funding_rate"]
         
@@ -959,6 +975,13 @@ Answer in GERMAN, max 2 sentences:
                     cg = self.get_coinglass_signals(symbol)
                     if cg is None:
                         logger.debug(f"  ⏭️ {symbol}: Keine Coinglass-Signale — überspringe")
+                        continue
+
+                    # 🕐 Handelsfenster-Sperre: Verluststunden 2-4/14/17/20/22 Uhr
+                    # (Simulation über 1577 Trades: diese Stunden = −323 USDT, 10-13 Uhr war GUT!)
+                    _h = time.localtime().tm_hour
+                    if _h in (2, 3, 4, 14, 17, 20, 22):
+                        logger.info(f"  ⏭️ {symbol}: Handelsfenster gesperrt ({_h}:00, Verluststunde) — kein neuer Trade")
                         continue
 
                     # 📡 Richtung per Funding-Signal entscheiden
